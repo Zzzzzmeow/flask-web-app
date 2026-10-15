@@ -1,57 +1,66 @@
-name: CI/CD Pipeline
+name: Deploy Flask App to Touge Server
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
-  # CI：单元测试
-  test:
-    name: 单元测试
+  deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: 检出代码
+      - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: 配置 Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
-      - name: 安装依赖
-        run: pip install -r requirements.txt
-
-      - name: 运行测试
-        run: python -m unittest discover -s tests -v
-
-  # CD：测试通过后自动部署到服务器
-  deploy:
-    name: 部署到服务器
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 配置 SSH 私钥
+      - name: Install dependencies and run tests
         run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest==8.4.1
+          pytest tests/ -v
+        continue-on-error: false
+
+      - name: Deploy to Touge Server via SSH (Port 52811)
+        run: |
+          # 配置SSH环境（强制兼容RSA私钥）
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+
+          # 写入RSA私钥（printf确保结尾换行，sed清除Windows复制可能带入的\r）
+          printf "%s\n" "${{ secrets.TOUGE_SSH_PRIVATE_KEY }}" | sed 's/\r$//' > ~/.ssh/id_rsa
+
+          # 强制设置权限（SSH协议要求）
           chmod 600 ~/.ssh/id_rsa
 
-      - name: 上传项目文件到服务器
-        run: |
-          ssh -o StrictHostKeyChecking=no -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "mkdir -p ~/flask-web-app"
-          scp -o StrictHostKeyChecking=no -P ${{ secrets.SSH_PORT }} -r src requirements.txt ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:~/flask-web-app/
+          # 扫描主机密钥（指定端口）
+          ssh-keyscan -p 52811 -H ${{ secrets.TOUGE_SERVER_IP }} >> ~/.ssh/known_hosts
+          echo "SSH环境配置完成，尝试连接服务器..."
 
-      - name: 安装依赖并重启应用
-        run: |
-          ssh -o StrictHostKeyChecking=no -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "
-            cd ~/flask-web-app
-            pip3 install -r requirements.txt -q
-            pkill -f 'python3.*app.py' || true
-            nohup python3 src/app.py > app.log 2>&1 &
+          # 确保项目目录存在
+          ssh -p 52811 -o StrictHostKeyChecking=accept-new -o PubkeyAcceptedAlgorithms=+ssh-rsa root@${{ secrets.TOUGE_SERVER_IP }} "mkdir -p /root/flask-web-app"
+
+          # 上传最新代码（服务器无法直连github.com，用scp代替git pull）
+          scp -P 52811 -o StrictHostKeyChecking=accept-new -o PubkeyAcceptedAlgorithms=+ssh-rsa -r src requirements.txt root@${{ secrets.TOUGE_SERVER_IP }}:/root/flask-web-app/
+
+          # 安装依赖并通过supervisor重启应用
+          ssh -p 52811 -o StrictHostKeyChecking=accept-new -o PubkeyAcceptedAlgorithms=+ssh-rsa root@${{ secrets.TOUGE_SERVER_IP }} "
+            cd /root/flask-web-app
+            pip3 install -r requirements.txt -q || pip3 install -r requirements.txt -q --break-system-packages
+            supervisorctl restart flask-web-app || supervisorctl start flask-web-app
+            supervisorctl status flask-web-app
             sleep 2
-            curl -s http://127.0.0.1:5000/
+            curl -s http://127.0.0.1:5000/ && echo
           "
+        env:
+          TOUGE_SSH_PRIVATE_KEY: ${{ secrets.TOUGE_SSH_PRIVATE_KEY }}
+          TOUGE_SERVER_IP: ${{ secrets.TOUGE_SERVER_IP }}
