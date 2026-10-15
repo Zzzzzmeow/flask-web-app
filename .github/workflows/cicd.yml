@@ -33,14 +33,20 @@ jobs:
 
       - name: Deploy to Touge Server via SSH (Port 52811)
         run: |
-          # 配置SSH环境（强制兼容RSA私钥）
+          # 配置SSH环境
           mkdir -p ~/.ssh
 
-          # 写入RSA私钥（printf确保结尾换行，sed清除Windows复制可能带入的\r）
-          printf "%s\n" "${{ secrets.TOUGE_SSH_PRIVATE_KEY }}" | sed 's/\r$//' > ~/.ssh/id_rsa
-
-          # 强制设置权限（SSH协议要求）
+          # 提取并清洗私钥：去除\r，只保留 BEGIN/END 之间的密钥行（自动剔除粘贴带入的多余内容）
+          printf "%s\n" "${{ secrets.TOUGE_SSH_PRIVATE_KEY }}" | tr -d '\r' | sed -n '/BEGIN OPENSSH PRIVATE KEY/,/END OPENSSH PRIVATE KEY/p' > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+
+          # 校验私钥格式（若Secret配置错误会在此处明确报错）
+          if ssh-keygen -y -f ~/.ssh/id_rsa > /dev/null 2>&1; then
+            echo "KEY_FORMAT_OK $(ssh-keygen -lf ~/.ssh/id_rsa)"
+          else
+            echo "::error::私钥Secret格式无效，请检查 TOUGE_SSH_PRIVATE_KEY 是否为完整私钥内容（含BEGIN/END行）"
+            exit 1
+          fi
 
           # 扫描主机密钥（指定端口）
           ssh-keyscan -p 52811 -H ${{ secrets.TOUGE_SERVER_IP }} >> ~/.ssh/known_hosts
